@@ -1,0 +1,136 @@
+need to 1st create the dbuser.keytab 
+
+cd ~
+
+ktutil 
+addindent -password -p dbuser@GOSQL.CO.UK -k -e aes128-cts-hmac-sha1-96
+password
+wkt dbuser.keytab
+
+ensure the keytab file can be authenticated
+sudo kinit -V -kt ~/dbuser.keytab dbuser
+kinit -V -kt /krb5/dbuser.keytab dbuser
+
+Using default cache: /tmp/krb5cc_0
+Using principal: dbuser@GOSQL.CO.UK
+Using keytab: /krb5/dbuser.keytab
+Authenticated to Kerberos v5
+
+sudo kinit -V -kt /krb5/dbuser.keytab dbuser
+microkk8s.kubectl create secret generic keytab --from-file=./dbuser.keytab
+secret/keytab created
+
+microk8s.kubectl proxy --accept-hosts=.* --address=0.0.0.0 &
+http://127.0.0.7:8001/api/v1/namespaces/kube-system/services/https:kubernetes-dashboard:/proxy/
+
+
+---
+
+apiVersion: v1
+data:
+  krb5.conf: |
+    # Configuration snippets may be placed in this directory as well
+    includedir /etc/krb5.conf.d/
+
+    [logging]
+    default = FILE:/var/log/krb5libs.log
+    kdc = FILE:/var/log/krb5kdc.log
+    admin_server = FILE:/var/log/kadmind.log
+
+    [libdefaults]
+    dns_lookup_realm = false
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = true
+    rdns = false
+    default_realm = GOSQL.CO.UK
+    default_keytab_name = /krb5/dbuser.keytab
+    default_ccache_name = /dev/shm/ccache
+    default_tkt_enctypes = arcfour-hmac-md5 des-cbc-crc des-cbc-md5 aes128-cts-hmac-sha1-96
+    default_tgs_enctypes = arcfour-hmac-md5 des-cbc-crc des-cbc-md5 aes128-cts-hmac-sha1-96
+
+    [realms]
+    GOSQL.CO.UK = {
+      kdc = domain.gosql.co.uk
+      admin_server = domain.gosql.co.uk
+    }
+
+    [domain_realm]
+    .gosql.co.uk = GOSQL.CO.UK
+    gosql.co.uk = GOSQL.CO.UK
+
+    
+    [logging]
+    kdc          = SYSLOG:NOTICE
+    admin_server = SYSLOG:NOTICE
+    default      = SYSLOG:NOTICE
+kind: ConfigMap
+metadata:
+  name: krb5-config
+  namespace: default
+---
+
+linux
+sudo docker save gosql-kinit > gosql-kinit.tar
+sudo microk8s ctr image import gosql-kinit.tar
+
+windows
+docker save gosql-dbapp -o gosql-dbapp.tar
+sudo microk8s ctr image import gosql-dbapp.tar
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kinit-dbapp
+spec:
+  hostAliases:
+  - ip: "192.168.1.2"
+    hostnames:
+    - "domain.gosql.co.uk"
+  - ip: "192.168.1.3"
+    hostnames:
+    - "sql.gosql.co.uk"  
+  containers:
+  - image: gosql-kinit:latest 
+    imagePullPolicy: Never
+    name: kinit
+    env:
+      - name: PERIOD_SECONDS
+        value: "10"
+      - name: OPTIONS
+        value: -k dbuser@GOSQL.CO.UK
+    restartPolicy: Always
+    volumeMounts:
+      - name: ccache
+        mountPath: /dev/shm
+      - name: krb5-config
+        mountPath: /etc/krb5.conf
+        subPath: krb5.conf
+      - name: keytab-vol  
+        mountPath: /krb5/dbuser.keytab
+        subPath: dbuser.keytab
+  - image: gosql-dbapp:latest
+    imagePullPolicy: Never
+    name: dbapp    
+    volumeMounts:
+      - name: ccache
+        mountPath: /dev/shm
+      - name: krb5-config
+        mountPath: /etc/krb5.conf
+        subPath: krb5.conf
+      - name: keytab-vol  
+        mountPath: /krb5/dbuser.keytab
+        subPath: dbuser.keytab
+  volumes:
+    - emptyDir:
+      medium: Memory
+      name: ccache
+    - name: krb5-config
+      configMap:
+        name: krb5-config
+        items:
+          - key: krb5.conf
+            path: krb5.conf
+    - name: keytab-vol
+      secret:
+         secretName: keytab

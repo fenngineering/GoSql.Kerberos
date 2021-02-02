@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-kerb-dbapp
+spec:
+  containers:
+  - image: gosql-dbapp:latest
+    imagePullPolicy: Never
+    name: dbapp   
